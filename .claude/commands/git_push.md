@@ -1,5 +1,5 @@
 ---
-title: 'Git Commit Task'
+title: 'Git Push Task'
 read_only: true
 type: 'command'
 description: Stage all changes, generate commit message, commit and push.
