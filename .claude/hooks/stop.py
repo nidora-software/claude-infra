@@ -1,26 +1,15 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = [
-#     "python-dotenv",
-# ]
+# dependencies = []
 # ///
 
-import argparse
 import json
 import os
 import sys
 import random
 import subprocess
 from pathlib import Path
-from datetime import datetime
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # dotenv is optional
-
 
 def get_completion_messages():
     """Return list of friendly completion messages."""
@@ -31,7 +20,6 @@ def get_completion_messages():
         "Job complete!",
         "Ready for next task!"
     ]
-
 
 def get_tts_script_path():
     """
@@ -60,7 +48,6 @@ def get_tts_script_path():
         return str(pyttsx3_script)
     
     return None
-
 
 def get_llm_completion_message():
     """
@@ -137,68 +124,229 @@ def announce_completion():
         # Fail silently for any other errors
         pass
 
+def extract_latest_message(transcript_path):
+    try:
+        transcript_file = Path(transcript_path).expanduser()
 
+        if not transcript_file.exists():
+            return None, "Transcript file does not exist."
+
+        with transcript_file.open('r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        if not lines:
+            return None, "Transcript file is empty."
+
+        # Find the latest assistant message (role=assistant)
+        latest_assistant_msg = None
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i].strip()
+            if line:
+                try:
+                    data = json.loads(line)
+                    if data.get('message', {}).get('role') == 'assistant':
+                        latest_assistant_msg = data
+                        break
+                except json.JSONDecodeError:
+                    continue
+        
+        if not latest_assistant_msg:
+            return None, "No assistant message found in transcript."
+
+        parentUuid = latest_assistant_msg.get('parentUuid', '')
+        message_block = latest_assistant_msg.get('message', {})
+        model = message_block.get('model')
+        content_list = message_block.get('content', [])
+
+        text = ''
+        if content_list and isinstance(content_list, list):
+            for block in content_list:
+                if block.get('type') == 'text':
+                    text = block.get('text', '').strip()
+                    break
+
+        if not model or model.strip() == '':
+            model = None
+        if not text or text.strip() == '':
+            text = None
+
+        return {'model': model, 'text': text, 'parentUuid': parentUuid}, None
+
+    except Exception as e:
+        return None, f"Error reading transcript: {e}"
+
+
+def extract_project_name(transcript_path):
+    try:
+        path_str = str(transcript_path)
+        # Look for the 'projects' directory as the standardized keyword
+        if 'projects' in path_str:
+            # Split by 'projects' and take the part after it
+            after_projects = path_str.split('projects', 1)[1]
+            # Remove leading slashes or backslashes
+            after_projects = after_projects.lstrip('\\/')
+            # Get the first path segment (project folder name)
+            project_name = after_projects.split('\\')[0].split('/')[0]
+            return project_name
+        return None
+    except Exception:
+        return None
+
+
+def extract_initial_prompt(transcript_path, prompt_uuid):
+    try:
+        transcript_file = Path(transcript_path).expanduser()
+
+        if not transcript_file.exists():
+            return None
+
+        # Find all messages
+        messages = []
+        with transcript_file.open('r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        entry = json.loads(line.strip())
+                        messages.append(entry)
+                    except json.JSONDecodeError:
+                        continue
+
+        # Create a map for quick UUID lookups (using root-level uuid)
+        current_uuid = prompt_uuid
+
+        for entry in reversed(messages):
+            message = entry.get('message', {})
+            # Check if this is a user prompt: entry type is 'user' AND message role is 'user'
+            if entry.get('uuid') == current_uuid and entry.get('type') == 'user' and message.get('role') == 'user' and isinstance(message.get('content'), str):
+                return message.get('content').strip()
+            else:
+                current_uuid = entry.get('parentUuid')
+
+
+        return None
+
+    except Exception as e:
+        return "Prompt extraction error: " + str(e)
+
+def build_message(data):
+    try:
+        lines = []
+
+        session_id = data.get('session_id')
+        transcript_path = data.get('transcript_path')
+
+        if not session_id or not transcript_path:
+            return None, "Missing required fields: 'session_id' and 'transcript_path'."
+
+        # Session always included
+        lines.append(f"🆔 *Session*\n`{session_id}`")
+        
+        # Extract transcript latest message
+        latest_data, _ = extract_latest_message(transcript_path)
+        if latest_data and latest_data['model']:
+            lines.append(f"🤖 *Model*\n{latest_data['model']}")
+
+        # Extract and include project name
+        project_name = extract_project_name(transcript_path)
+        if project_name:
+            lines.append(f"📁 *Project*\n{project_name}")
+
+        # Check if stop hook is already active - if so, skip notification to prevent duplicates
+        if data.get('stop_hook_active'):
+            return None, "Stop hook already active - skipping notification to prevent duplicates"
+
+        # Tool Info
+        tool_name = data.get('tool_name')
+        if tool_name:
+            lines.append(f"🔧 *Tool Name*\n{tool_name}")
+
+        tool_input = data.get('tool_input')
+        if tool_input:
+            file_path = tool_input.get('file_path')
+            if file_path:
+                lines.append(f"📄 *Tool Input File*\n`{file_path}`")
+
+            content = tool_input.get('content')
+            if content:
+                lines.append(f"📝 *Tool Input Content*\n{content}")
+
+        tool_response = data.get('tool_response')
+        if tool_response:
+            file_path_resp = tool_response.get('filePath')
+            if file_path_resp:
+                lines.append(f"📄 *Tool Response File*\n`{file_path_resp}`")
+
+            success = tool_response.get('success')
+            if success is not None:
+                lines.append(f"💾 *Tool Success*\n`{success}`")
+
+
+        # Extract prompt
+        if latest_data and latest_data.get('parentUuid'):
+            prompt = extract_initial_prompt(transcript_path, latest_data['parentUuid'])
+            if prompt and prompt.strip():
+                lines.append(f"💬 *Prompt*\n{prompt}")
+
+        if latest_data and latest_data['text']:
+            lines.append(f"📝 *Message*\n{latest_data['text']}")
+
+        # Final input message
+        final_message_block = ''
+        input_message = data.get('message')
+        if input_message:
+            final_message_block = f"\n\n*⚠️ {input_message}*"
+
+        # Optional title
+        title = data.get('title')
+        header = f"📣 *{title}*\n\n" if title else ""
+
+        final_message = header + "\n\n".join(lines) + final_message_block
+        return final_message, None
+
+    except Exception as e:
+        return None, f"Error building message: {e}"
+
+def send_telegram_notification(data):
+    """Send notification to Telegram using the build_message function."""
+    try:
+        # Build the message using the unified function
+        message, error = build_message(data)
+
+        if error or not message:
+            return  # Skip if message building failed
+        
+        # Get telegram script path
+        script_dir = Path(__file__).parent
+        telegram_script = script_dir / "utils" / "telegram.py"
+        
+        if not telegram_script.exists():
+            return  # Skip if telegram script doesn't exist
+        
+        # Call telegram.py via uv with the built message
+        subprocess.run([
+            "uv", "run", str(telegram_script), message
+        ], 
+        capture_output=True,  # Suppress output
+        timeout=10  # 10-second timeout
+        )
+        
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError):
+        # Fail silently if telegram encounters issues
+        pass
+    except Exception:
+        # Fail silently for any other errors
+        pass
+    
 def main():
     try:
-        # Parse command line arguments
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--chat', action='store_true', help='Copy transcript to chat.json')
-        args = parser.parse_args()
-        
         # Read JSON input from stdin
         input_data = json.load(sys.stdin)
 
-        # Extract required fields
-        session_id = input_data.get("session_id", "")
-        stop_hook_active = input_data.get("stop_hook_active", False)
-
-        # Ensure log directory exists
-        log_dir = os.path.join(os.getcwd(), "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "stop.json")
-
-        # Read existing log data or initialize empty list
-        if os.path.exists(log_path):
-            with open(log_path, 'r') as f:
-                try:
-                    log_data = json.load(f)
-                except (json.JSONDecodeError, ValueError):
-                    log_data = []
-        else:
-            log_data = []
-        
-        # Append new data
-        log_data.append(input_data)
-        
-        # Write back to file with formatting
-        with open(log_path, 'w') as f:
-            json.dump(log_data, f, indent=2)
-        
-        # Handle --chat switch
-        if args.chat and 'transcript_path' in input_data:
-            transcript_path = input_data['transcript_path']
-            if os.path.exists(transcript_path):
-                # Read .jsonl file and convert to JSON array
-                chat_data = []
-                try:
-                    with open(transcript_path, 'r') as f:
-                        for line in f:
-                            line = line.strip()
-                            if line:
-                                try:
-                                    chat_data.append(json.loads(line))
-                                except json.JSONDecodeError:
-                                    pass  # Skip invalid lines
-                    
-                    # Write to logs/chat.json
-                    chat_file = os.path.join(log_dir, 'chat.json')
-                    with open(chat_file, 'w') as f:
-                        json.dump(chat_data, f, indent=2)
-                except Exception:
-                    pass  # Fail silently
-
         # Announce completion via TTS
         announce_completion()
+
+        # Send Telegram notification
+        send_telegram_notification(input_data)
 
         sys.exit(0)
 
