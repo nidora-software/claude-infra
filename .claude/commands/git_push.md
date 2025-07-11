@@ -1,7 +1,7 @@
 ---
-title: 'Git Commit Task'
+title: "Git Commit & Push Task"
 read_only: true
-type: 'command'
+type: "command"
 description: Stage all changes, generate commit message, commit and push.
 ---
 
@@ -9,6 +9,6 @@ description: Stage all changes, generate commit message, commit and push.
 
 - Add all changes to stage.
 - Generate a commit message, follow the universal git standards and best practices.
-    - Do NOT add Claude co-authorship footer to commits.
+  - Do NOT add Claude co-authorship footer to commits.
 - Commit with that message.
 - Push changes into remote.
